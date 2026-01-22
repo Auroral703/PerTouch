@@ -1360,16 +1360,52 @@
         let currentSection = 0;
         let isAnimating = false;
         const totalSections = sections.length;
+        let isFullPageScroll = true; // 默认使用整页滚动
 
         let wordIdx = 0;
         let charIdx = 0;
         let isDeleting = false;
         let timeout = 150;
 
+        // 检测屏幕分辨率是否小于1080p
+        function isLowResolution() {
+            return window.innerHeight < 1080;
+        }
+
+        // 初始化滚动模式
+        function initScrollMode() {
+            isFullPageScroll = !isLowResolution();
+            updateScrollMode();
+        }
+
+        // 更新滚动模式
+        function updateScrollMode() {
+            if (isFullPageScroll) {
+                // 启用整页滚动
+                scroller.style.overflow = 'hidden';
+                scrollContent.style.height = `${totalSections * 100}vh`;
+                sections.forEach(section => {
+                    section.style.height = '100vh';
+                });
+                updateScrollPosition();
+            } else {
+                // 启用正常滚动
+                scroller.style.overflow = 'auto';
+                scrollContent.style.height = 'auto';
+                scrollContent.style.transform = 'translateY(0)';
+                sections.forEach(section => {
+                    section.style.height = 'auto';
+                    section.style.minHeight = '100vh';
+                });
+                // 更新导航栏和Logo状态
+                updateNavbarAndLogoOnScroll();
+            }
+        }
+
         // 初始化页面
         window.addEventListener('load', () => {
-            // 初始化滚动位置
-            updateScrollPosition();
+            // 初始化滚动模式
+            initScrollMode();
             // 触发第一页动画
             triggerAnimations(0);
         });
@@ -1420,8 +1456,10 @@
             });
         }
 
-        // 更新滚动位置
+        // 更新滚动位置（整页滚动模式）
         function updateScrollPosition() {
+            if (!isFullPageScroll) return;
+            
             const scrollY = -currentSection * window.innerHeight;
             scrollContent.style.transform = `translateY(${scrollY}px)`;
 
@@ -1453,20 +1491,67 @@
 
         // 处理滚动视觉效果 (视差)
         function handleScroll() {
-            const scrollY = currentSection * window.innerHeight;
+            const scrollY = isFullPageScroll ? currentSection * window.innerHeight : scroller.scrollTop;
             blobs.forEach((blob, index) => {
                 const speed = 0.02 * (index + 1);
                 blob.style.transform = `translateY(${scrollY * speed}px) translateZ(0)`;
             });
         }
 
+        // 在正常滚动模式下更新导航栏和Logo状态
+        function updateNavbarAndLogoOnScroll() {
+            if (isFullPageScroll) return;
+            
+            const scrollTop = scroller.scrollTop;
+            const windowHeight = window.innerHeight;
+            
+            // 更新导航栏和Logo状态
+            if (scrollTop < windowHeight * 0.5) {
+                flyLogo.className = 'logo-home-pos';
+                navbar.classList.remove('sticky');
+            } else {
+                flyLogo.className = 'logo-nav-pos';
+                navbar.classList.add('sticky');
+            }
+            
+            // 更新导航项的active状态
+            let currentSectionIndex = 0;
+            sections.forEach((section, index) => {
+                const sectionTop = section.offsetTop;
+                if (scrollTop >= sectionTop - windowHeight * 0.3) {
+                    currentSectionIndex = index;
+                }
+            });
+            
+            const navLinks = document.querySelectorAll('.nav-links li');
+            navLinks.forEach((link, index) => {
+                if (index === currentSectionIndex) {
+                    link.classList.add('active');
+                } else {
+                    link.classList.remove('active');
+                }
+            });
+            
+            handleScroll();
+        }
+
         function navigateToSection(sectionId) {
             const sectionIndex = [...sections].findIndex(section => section.id === sectionId);
-            if (sectionIndex !== -1 && !isAnimating) {
+            if (sectionIndex === -1) return;
+            
+            if (isFullPageScroll && !isAnimating) {
                 isAnimating = true;
                 currentSection = sectionIndex;
                 updateScrollPosition();
                 setTimeout(() => { isAnimating = false; }, 800);
+            } else if (!isFullPageScroll) {
+                // 正常滚动模式下直接滚动到目标section
+                const targetSection = sections[sectionIndex];
+                const targetTop = targetSection.offsetTop;
+                scroller.scrollTo({
+                    top: targetTop,
+                    behavior: 'smooth'
+                });
             }
         }
 
@@ -1475,10 +1560,11 @@
             navigateToSection(targetId);
         }
 
-        scroller.addEventListener('wheel', (e) => {
+        // 整页滚动模式的鼠标滚轮事件
+        function handleFullPageScrollWheel(e) {
+            if (!isFullPageScroll || isAnimating) return;
+            
             e.preventDefault();
-            if (isAnimating) return;
-
             const delta = e.deltaY;
             if (delta > 0 && currentSection < totalSections - 1) {
                 currentSection++;
@@ -1491,15 +1577,30 @@
             isAnimating = true;
             updateScrollPosition();
             setTimeout(() => { isAnimating = false; }, 800);
-        }, { passive: false });
+        }
+
+        // 正常滚动模式的滚动事件
+        function handleNormalScroll() {
+            if (isFullPageScroll) return;
+            updateNavbarAndLogoOnScroll();
+        }
 
         window.addEventListener('resize', () => {
-            scrollContent.style.height = `${totalSections * 100}vh`;
-            updateScrollPosition();
+            // 重新检测滚动模式
+            const newScrollMode = !isLowResolution();
+            if (newScrollMode !== isFullPageScroll) {
+                isFullPageScroll = newScrollMode;
+                updateScrollMode();
+            } else if (isFullPageScroll) {
+                // 如果仍然是整页滚动模式，更新高度和位置
+                scrollContent.style.height = `${totalSections * 100}vh`;
+                updateScrollPosition();
+            }
         });
 
-        // 初始化高度
-        scrollContent.style.height = `${totalSections * 100}vh`;
+        // 添加滚动事件监听器
+        scroller.addEventListener('wheel', handleFullPageScrollWheel, { passive: false });
+        scroller.addEventListener('scroll', handleNormalScroll);
 
         // Copy BibTeX functionality
         const copyBibtexBtn = document.getElementById('copyBibtexBtn');
