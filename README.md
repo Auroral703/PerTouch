@@ -18,7 +18,7 @@
 </p> -->
 
 <p align="center">
-    <a href="https://arxiv.org/abs/2511.12998"><img src='https://img.shields.io/badge/Paper-2509.14268-red' alt='Paper PDF'></a>
+    <a href="https://arxiv.org/abs/2511.12998"><img src='https://img.shields.io/badge/Paper-2511.12998-red' alt='Paper PDF'></a>
    <!-- <a href='https://huggingface.co/JiachenFu/Qwen2-0.5B-detectanyllm-detector-en'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model-blue'></a> -->
     <!-- <a href="https://huggingface.co/spaces/JiachenFu/DetectAnyLLM"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Demo-blue" alt="Hugging Face Demo"></a> -->
     <a href="https://auroral703.github.io/PerTouch/"><img src='https://img.shields.io/badge/Project-Page-green' alt='Project Page'></a>
