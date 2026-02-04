@@ -163,4 +163,3 @@ If you find our work useful, please consider citing:
 - [x] Code of Dataset Preparation.
 - [x] Trained weights of our PerTouch.
 - [x] VLM-Driven Agent Code and Gradio.
-- [x] Online Demo.
