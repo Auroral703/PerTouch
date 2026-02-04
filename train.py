@@ -11,7 +11,6 @@ import accelerate
 import diffusers
 import kornia
 import numpy as np
-import pycocotools.mask as mask_util
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
@@ -21,13 +20,11 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import DatasetDict
-from datasets import load_dataset
 from diffusers import (
     AutoencoderKL,
     DDPMScheduler,
 )
 from diffusers.optimization import get_scheduler
-from diffusers.utils import check_min_version
 from packaging import version
 from torch.utils.data import Dataset
 from torchvision import transforms
@@ -38,16 +35,15 @@ from models.controlnet import ControlNetModel
 from models.unet_2d_condition import UNet2DConditionModel
 from models.utils import UnetConvout
 
-# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.32.0.dev0")
 
 logger = get_logger(__name__)
 
 
-def import_model_class_from_model_name_or_path(pretrained_model_name_or_path: str, revision: str):
+def import_model_class_from_model_name_or_path(pretrained_model_name_or_path: str, revision: str, cache_dir: str):
     text_encoder_config = PretrainedConfig.from_pretrained(
         pretrained_model_name_or_path,
         subfolder="text_encoder",
+        cache_dir=cache_dir,
         revision=revision,
     )
     model_class = text_encoder_config.architectures[0]
@@ -68,13 +64,6 @@ def parse_args(input_args=None):
     parser = argparse.ArgumentParser(description="Training script for ControlNet with metric conditioning.")
 
     # Model parameters
-    parser.add_argument(
-        "--pretrained_model_name_or_path",
-        type=str,
-        default=None,
-        required=True,
-        help="Path to pretrained models or model identifier from huggingface.co/models."
-    )
     parser.add_argument(
         "--revision",
         type=str,
@@ -104,7 +93,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=None,
         help="Random seed for reproducibility."
     )
     parser.add_argument(
@@ -275,12 +264,6 @@ def parse_args(input_args=None):
 
     # Dataset parameters
     parser.add_argument(
-        "--dataset_name",
-        type=str,
-        default=None,
-        help="HuggingFace dataset name."
-    )
-    parser.add_argument(
         "--dataset_config_name",
         type=str,
         default=None,
@@ -335,8 +318,8 @@ def parse_args(input_args=None):
         args = parser.parse_args()
 
     # Validations
-    if args.dataset_name is None and args.train_data_dir is None:
-        raise ValueError("Specify either --dataset_name or --train_data_dir")
+    if args.train_data_dir is None:
+        raise ValueError("Specify --train_data_dir")
     if args.resolution % 8 != 0:
         raise ValueError("Resolution must be divisible by 8")
 
@@ -345,7 +328,7 @@ def parse_args(input_args=None):
 
 def disturbance(tensor, sigma=5.0, max_shift=20, min_kernel_size=5, max_kernel_size=20):
     """
-    Apply random Gaussian blur and translation perturbation
+    Apply random Gaussian blur and translation perturbation (parameter perturbation)
     args:
     tensor: Input tensor, shape (bs, 4, 512, 512)
     sigma_min: Minimum σ value for Gaussian blur
@@ -396,36 +379,7 @@ def disturbance(tensor, sigma=5.0, max_shift=20, min_kernel_size=5, max_kernel_s
 
     return result
 
-def blend_images_with_mask(img1, img2, mask, sigma=1):
-    """
-    Blend the mask portion of img2 into img1, with edge smoothing using Gaussian blur.
-
-    Args:
-        img1 (PIL.Image): First image.
-        img2 (PIL.Image): Second image.
-        mask (torch.Tensor): Mask tensor with shape (H, W).
-        sigma (float): Standard deviation for Gaussian blur, controlling the smoothness of edge transition.
-
-    Returns:
-        PIL.Image: Blended image.
-    """
-    img1_np = np.array(img1).astype(np.float32) / 255.0
-    img2_np = np.array(img2).astype(np.float32) / 255.0
-
-    mask_np = mask.numpy().astype(np.float32)
-    mask_np = np.stack([mask_np] * 3, axis=-1)
-
-    # alpha = gaussian_filter(mask_np, sigma=sigma)
-    # blended_np = img1_np * (1 - alpha) + img2_np * alpha
-
-    blended_np = img1_np * (1 - mask_np) + img2_np * mask_np
-
-    blended_np = (blended_np * 255).astype(np.uint8)
-    blended_img = Image.fromarray(blended_np)
-
-    return blended_img
-
-class ImageDatasetNewtest(Dataset):
+class ImageParamDataset(Dataset):
     def __init__(
         self,
         input_root_dir,
@@ -503,7 +457,7 @@ class ImageDatasetNewtest(Dataset):
         img_expert = Image.open(expert_path).convert("RGB")
 
         # 3) Load metric file (.npz)
-        metric_fname = img_name.replace('.jpg', '_scores_norm_q.npz')
+        metric_fname = img_name.replace('.jpg', '_parameter_map_norm.npz')
         metric_path = os.path.join(self.metric_dirs[expert_idx], metric_fname)
         img_metric = self.load_scores(metric_path)
 
@@ -571,235 +525,8 @@ class ImageDatasetNewtest(Dataset):
             "img_expert": img_expert,
         }
 
-class ImageDatasetNew(Dataset):
-    def __init__(self, image_dir, expert_dirs_dir, metric_dir, image_transforms=None, metric_transforms=None):
-        self.image_dir = image_dir
-        self.expert_image_dir = expert_dirs_dir
-        self.metric_dir = metric_dir
-
-        self.image_transforms = image_transforms
-        self.metric_transforms = metric_transforms
-
-        self.image_files = sorted(os.listdir(image_dir))
-        self.expert_dirs = sorted(os.listdir(expert_dirs_dir))
-        self.metric_files = sorted(os.listdir(metric_dir))
-
-        self.num_exp_dir = len(self.expert_dirs)
-        self.num_data = len(self.image_files) * self.num_exp_dir
-
-        self.column_names = ["img", "img_metric", "img_expert"]
-
-    def __len__(self):
-        return self.num_data
-
-    def load_scores(self, path):
-        data = np.load(path)['data'].astype(np.float32)
-        return torch.from_numpy(data)
-
-    def __getitem__(self, idx):
-        img_idx = idx // self.num_exp_dir
-        exp_dirs_idx = idx % self.num_exp_dir
-
-        img_name = self.image_files[img_idx]
-        exp_img_name = self.expert_dirs[exp_dirs_idx]
-        metric_name = self.metric_files[exp_dirs_idx]
-
-        img_path = os.path.join(self.image_dir, img_name)
-        img = Image.open(img_path).convert("RGB")
-
-        expert_img_path = os.path.join(self.expert_image_dir, exp_img_name, img_name)
-        img_expert = Image.open(expert_img_path).convert("RGB")
-
-        metric_path = os.path.join(self.metric_dir, metric_name, img_name.replace('.jpg', '_scores_norm_q.npz'))
-        img_metric = self.load_scores(metric_path)
-
-        if self.image_transforms:
-            img = self.image_transforms(img)
-            img_expert = self.image_transforms(img_expert)
-
-        if self.metric_transforms:
-            img_metric = self.metric_transforms(img_metric)
-
-        if random.random() < args.alpha:
-            # Extract segmentation map from metric's first channel
-            seg_map = img_metric[0]  # 假设第一个通道存储分割信息
-
-            # Get all independent segmentation blocks
-            unique_blocks = torch.unique(seg_map)
-            blocks = []
-            for block_id in unique_blocks:
-                mask = (seg_map == block_id)
-                area = torch.sum(mask).item()
-                if area < 1024:
-                    continue
-                blocks.append({'mask': mask, 'area': area})
-
-            # Select block according to area probability
-            if blocks:
-                total_area = sum(b['area'] for b in blocks)
-                probabilities = [b['area'] / total_area for b in blocks]
-                selected_block = random.choices(blocks, weights=probabilities, k=1)[0]
-                elected_mask = selected_block['mask']
-
-                # Calculate current block feature (geometric distance)
-                current_block = img_metric[:, elected_mask]  # [4, N]
-
-                # Find the best expert with the largest difference  
-                max_diff = -1
-                best_exp_idx = exp_dirs_idx
-
-                for candidate_idx in range(self.num_exp_dir):
-                    if candidate_idx == exp_dirs_idx:
-                        continue
-
-                    # Load candidate expert metric
-                    candidate_metric_path = os.path.join(
-                        self.metric_dir,
-                        self.metric_files[candidate_idx],
-                        img_name.replace('.jpg', '_scores_norm_q.npz')
-                    )
-                    candidate_metric = self.load_scores(candidate_metric_path)
-
-                    # Calculate candidate feature difference
-                    candidate_block = candidate_metric[:, elected_mask]  # [4, N]
-                    diff = torch.norm(current_block - candidate_block, p=2).item()  # L2范数
-
-                    if diff > max_diff:
-                        max_diff = diff
-                        best_exp_idx = candidate_idx
-
-                # Execute replacement operation
-                if best_exp_idx != exp_dirs_idx:
-                    # Load best expert image
-                    best_exp_img = Image.open(
-                        os.path.join(self.expert_image_dir, self.expert_dirs[best_exp_idx], img_name)
-                    ).convert("RGB")
-                    best_exp_img = self.image_transforms(best_exp_img)
-
-                    # Mix images (directly replace mask region)
-                    img_expert[:, elected_mask] = best_exp_img[:, elected_mask]
-
-                    # Load and replace metric
-                    best_metric = self.load_scores(os.path.join(
-                        self.metric_dir,
-                        self.metric_files[best_exp_idx],
-                        img_name.replace('.jpg', '_scores_norm_q.npz')
-                    ))
-                    img_metric[:, elected_mask] = best_metric[:, elected_mask]
-
-        return {
-            "img": img,
-            "img_metric": img_metric,
-            "img_expert": img_expert,
-        }
-
-class ImageDataset(Dataset):
-    def __init__(self, image_dir, mask_json_dir, metric_json_dir, expert_image_dir, image_transforms=None, metric_transforms=None):
-        self.image_dir = image_dir
-        self.expert_image_dir = expert_image_dir
-        self.mask_json_dir = mask_json_dir
-        self.metric_json_dir = metric_json_dir
-        self.image_transforms = image_transforms
-        self.metric_transforms = metric_transforms
-
-        self.image_files = sorted(os.listdir(image_dir))
-        self.expert_files = sorted(os.listdir(expert_image_dir))
-
-        self.num_exp = len(self.expert_files)
-        self.num_data = len(self.image_files) * self.num_exp
-
-        with open(metric_json_dir, "r") as f:
-            self.class_metric = json.load(f)
-        with open(mask_json_dir, "r") as f:
-            self.image_seg = json.load(f)
-
-        self.column_names = ["img", "img_metric", "img_expert"]
-
-    def __len__(self):
-        return self.num_data
-
-    def __getitem__(self, idx):
-        img_idx = idx // self.num_exp
-        exp_idx = idx % self.num_exp
-
-        img_name = self.image_files[img_idx]
-        exp_img_name = self.expert_files[exp_idx]
-
-        img_path = os.path.join(self.image_dir, img_name)
-        img = Image.open(img_path).convert("RGB")
-
-        expert_img_path = os.path.join(self.expert_image_dir, exp_img_name, img_name)
-        img_expert = Image.open(expert_img_path).convert("RGB")
-
-        seg = self.image_seg[img_name]
-        h, w = seg[0]["segmentation"]["size"]
-        seg_binary = [torch.tensor(mask_util.decode(i["segmentation"]), dtype=torch.uint8) for i in seg]
-
-        metric = self.class_metric[img_name][exp_img_name]
-        metric_binary = [list(_.values()) for _ in metric.values()]
-
-        img_metric = torch.empty(args.num_feathers, h, w)
-        for i in range(args.num_feathers):  # num feathers
-            for j in range(len(seg_binary)):  # num class
-                img_metric[i][seg_binary[j] == 1] = metric_binary[j][i]
-
-        if random.random() < args.alpha:
-            # print(img_metric.shape)  # [num_feathers, 448, 448]
-            mask_areas = [torch.sum(mask).item() for mask in seg_binary]
-            probabilities = [area / sum(mask_areas) for area in mask_areas]
-            elected_mask = random.choices(seg_binary, weights=probabilities, k=1)[0]  # 448, 448
-            elected_index = None
-            for idx, mask in enumerate(seg_binary):
-                if torch.equal(mask, elected_mask):
-                    elected_index = idx
-                    break
-            mask_indices = torch.nonzero(elected_mask)
-            y, x = mask_indices[0] if len(mask_indices) > 0 else (0, 0)
-            mask_values_per_channel = img_metric[:, y, x]
-
-            min_distance = 0.0
-            best_img_exp = None
-            best_met_binary = None
-            for i in range(self.num_exp):
-                if i == exp_idx:
-                    continue
-                exp_img_name = self.expert_files[i]
-                expert_img_path = os.path.join(self.expert_image_dir, exp_img_name, img_name)
-                img_exp = Image.open(expert_img_path).convert("RGB")
-                met = self.class_metric[img_name][exp_img_name]
-                met_binary = [list(_.values()) for _ in met.values()][elected_index]  # [num_class, num_feathers]
-                distance = np.linalg.norm(np.array(mask_values_per_channel) - np.array(met_binary))
-                if distance > min_distance:
-                    min_distance = distance
-                    best_img_exp = img_exp
-                    # best_met_binary = np.where(np.array(met_binary) > np.array(mask_values_per_channel), 1, -1)
-                    best_met_binary = met_binary
-
-            for i in range(img_metric.shape[0]):
-                img_metric[i, elected_mask == 1] = best_met_binary[i]
-
-            img_expert = blend_images_with_mask(img_expert, best_img_exp, elected_mask)
-
-        if self.image_transforms:
-            img = self.image_transforms(img)
-            img_expert = self.image_transforms(img_expert)
-
-        if self.metric_transforms:
-            img_metric = self.metric_transforms(img_metric)
-
-        return {
-            "img": img,
-            "img_metric": img_metric,
-            "img_expert": img_expert,
-        }
 
 def make_train_dataset(args, accelerator):
-    # Get the datasets: you can either provide your own training and evaluation files (see below)
-    # or specify a Dataset from the hub (the dataset will be downloaded automatically from the datasets Hub).
-
-    # In distributed training, the load_dataset function guarantees that only one local process can concurrently
-    # download the dataset.
-
     # normalize = transforms.Lambda(lambda x: x / 127.5 - 1)
     image_transforms = transforms.Compose(
         [
@@ -815,36 +542,25 @@ def make_train_dataset(args, accelerator):
         ]
     )
 
-    if args.dataset_name is not None:
-        # Downloading and loading a dataset from the hub.
-        dataset = load_dataset(
-            args.dataset_name,
-            args.dataset_config_name,
-            cache_dir=args.cache_dir,
+    if args.train_data_dir is not None:
+        train_dataset = ImageParamDataset(
+            input_root_dir=os.path.join(args.train_data_dir, "Input"),
+            expert_root_dir=os.path.join(args.train_data_dir, "Expert"),
+            metric_root_dir=os.path.join(args.train_data_dir, "parameter_maps_norm/Expert"),
+            image_transforms=image_transforms,
+            metric_transforms=metric_transforms
         )
+
+        dataset = DatasetDict({
+            "train": train_dataset,
+        })
     else:
-        if args.train_data_dir is not None:
-            train_dataset = ImageDatasetNewtest(
-                input_root_dir=os.path.join(args.train_data_dir, "Input"),
-                expert_root_dir=os.path.join(args.train_data_dir, "Expert"),
-                metric_root_dir=os.path.join(args.train_data_dir, "score_tensors_norm_q/Expert"),
-                image_transforms=image_transforms,
-                metric_transforms=metric_transforms
-            )
+        raise ValueError(
+            f"lack of `--train_data_dir` value"
+        )
 
-            dataset = DatasetDict({
-                "train": train_dataset,
-            })
-        else:
-            raise ValueError(
-                f"lack of `--train_data_dir` value"
-            )
-
-    # Preprocessing the datasets.
-    # We need to tokenize inputs and targets.
     column_names = dataset["train"].column_names
 
-    # 6. column names for input/target.
     if args.image_column is None:
         image_column = column_names[0]
         logger.info(f"image column defaulting to {image_column}")
@@ -878,8 +594,6 @@ def make_train_dataset(args, accelerator):
     with accelerator.main_process_first():
         if args.max_train_samples is not None:
             dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
-        # Set the training transforms
-        # train_dataset = dataset["train"].with_transform(preprocess_train)
 
     return dataset["train"]
 
@@ -967,16 +681,16 @@ def main(args):
         overrode_max_train_steps = True
 
     # Load scheduler and models
-    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
-    text_encoder_cls = import_model_class_from_model_name_or_path(args.pretrained_model_name_or_path, args.revision)
+    noise_scheduler = DDPMScheduler.from_pretrained("sd2-community/stable-diffusion-2-1", subfolder="scheduler", cache_dir=args.cache_dir)
+    text_encoder_cls = import_model_class_from_model_name_or_path("sd2-community/stable-diffusion-2-1", args.revision, cache_dir=args.cache_dir)
     text_encoder = text_encoder_cls.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
+        "sd2-community/stable-diffusion-2-1", subfolder="text_encoder", revision=args.revision, variant=args.variant, cache_dir=args.cache_dir
     )
     vae = AutoencoderKL.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant
+        "sd2-community/stable-diffusion-2-1", subfolder="vae", revision=args.revision, variant=args.variant, cache_dir=args.cache_dir
     )
     unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
+        "sd2-community/stable-diffusion-2-1", subfolder="unet", revision=args.revision, variant=args.variant, cache_dir=args.cache_dir
     )
     unet_conv_out = UnetConvout(unet.conv_out.weight, unet.conv_out.bias)
 
@@ -1051,14 +765,6 @@ def main(args):
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
 
-    # Check that all trainable models are in full precision
-    low_precision_error_string = (
-        " Please make sure to always have all models weights in full float32 precision when starting training - even if"
-        " doing mixed precision training, copy of the weights should still be float32."
-    )
-
-    # Enable TF32 for faster training on Ampere GPUs,
-    # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
     if args.allow_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -1067,7 +773,6 @@ def main(args):
             args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
         )
 
-    # Use 8-bit Adam for lower memory usage or to fine-tune the models in 16GB GPUs
     if args.use_8bit_adam:
         try:
             import bitsandbytes as bnb
@@ -1109,9 +814,10 @@ def main(args):
 
     # get null prompt embedding
     tokenizer = AutoTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path,
+        "sd2-community/stable-diffusion-2-1", 
         subfolder="tokenizer",
         revision=args.revision,
+        cache_dir=args.cache_dir,
         use_fast=False,
     )
 
@@ -1274,10 +980,11 @@ def main(args):
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+        save_path = os.path.join(args.model_saved_dir, f"checkpoint-{global_step}")
         os.makedirs(save_path, exist_ok=True)
 
         controlnet.module.save_pretrained(os.path.join(save_path, 'controlnet'))
+        torch.save(unet_conv_out.module.state_dict(), os.path.join(save_path, 'unet_conv_out.pth'))
 
         logger.info(f"Saved state to {save_path}")
 

@@ -13,14 +13,10 @@
 <p align="center">
   †Corresponding Author
 </p>
-<!-- <p align="center">
-    <span style="color: #000000ff;">VCIP, Nankai University&nbsp; &nbsp; &nbsp; &nbsp;  SRC - B</span>
-</p> -->
 
 <p align="center">
     <a href="https://arxiv.org/abs/2511.12998"><img src='https://img.shields.io/badge/Paper-2511.12998-red' alt='Paper PDF'></a>
-   <!-- <a href='https://huggingface.co/JiachenFu/Qwen2-0.5B-detectanyllm-detector-en'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model-blue'></a> -->
-    <!-- <a href="https://huggingface.co/spaces/JiachenFu/DetectAnyLLM"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Demo-blue" alt="Hugging Face Demo"></a> -->
+   <a href='https://huggingface.co/Snowy1123/PerTouch'><img src='https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model-blue'></a>
     <a href="https://auroral703.github.io/PerTouch/"><img src='https://img.shields.io/badge/Project-Page-green' alt='Project Page'></a>
 </p>
 
@@ -45,13 +41,16 @@ To connect natural language instructions with visual control, we develop a **VLM
 ## 📖 Table of Contents
 - [🔥 News](#-news)
 - [🛠️ Dependencies and Installation](#-dependencies-and-installation)
+- [📊 Dataset Preparation](#-dataset-preparation)
 - [🚀 Training](#-training)
+- [🎨 Agent Gradio Demo](#-agent-gradio-demo)
 - [📝 Citation](#-citation)
 - [TODO](#-todo)
 
 ---
 
 ## 🔥 News
+- **[2026-2-4]** ✅ **All TODO items completed!** Released VLM-Driven Agent Code, Gradio Demo, Dataset Preparation Code, and trained weights.
 - **[2026-1-23]** 🎉 The training code of **PerTouch** diffusion backbone is released!
 - **[2025-11-17]** 🚀 Our paper **PerTouch** has been released at [Arxiv](https://arxiv.org/abs/2511.12998)!
 - **[2025-11-08]** 📝 Our paper **PerTouch: VLM-Driven Agent for Personalized and Semantic Image Retouching** is accepted by **AAAI 2026**!
@@ -65,18 +64,55 @@ To connect natural language instructions with visual control, we develop a **VLM
 2.  **Create and activate the conda environment:**
     ```bash
     conda env create -f environment.yaml
-    conda activate PerTouch
+    conda activate pertouch
     ```
-<!-- 4.  **Download necessary models:**
-    ```bash
-    sh scripts/download_model.sh
-    ```
-    > If you want to reproduce all experiments reported in our paper, please go to ```./scripts/download_model.sh``` and revise it following the guidance provided by common.
+3.  **Prepare necessary models:**
 
-    > If you have trouble downloading, try to set the environment variable before downloading:
+    The segmentation method used by our data structure and Agent has been updated to SAM3. Please configure it according to the [SAM3 Official Repository](https://github.com/facebookresearch/sam3) or the following operations:
+    ```bash
+    git clone https://github.com/facebookresearch/sam3.git
+    ```
+    ⚠️ Before using SAM 3, please request access to the checkpoints on the SAM 3 Hugging Face [repo](https://huggingface.co/facebook/sam3). Once accepted, You need to download the corresponding weight of SAM3 and place it in the following path.:
+    ```bash
+    model/sam3/sam3.pt
+    ```
+    Additionally, you need to download some of our PerTouch Backbone weights, please refer to the PerTouch Hugging Face [repo](https://huggingface.co/Snowy1123/PerTouch) and place the weights in the following path. The remaining weights will be downloaded automatically when used.
+    ```bash
+    model/ckpt
+    ```
+    > If you have trouble downloading, try to using the following command:
     ```bash
     export HF_ENDPOINT="https://hf-mirror.com"
-    ``` -->
+    ```
+
+## 📊 Dataset Preparation
+
+Our data construction pipeline supports one-click construction of Parameter Maps required for training. You need to store all input images and corresponding images modified by multiple experts in the following path:
+
+```
+PerTouch/
+├── data/
+│   ├── train/
+│   │   ├── Expert/         # Edited results from various experts
+│   │   │   ├── Expert A/
+│   │   │   ├── Expert B/
+│   │   │   └── ...
+│   │   ├── Input/          # Corresponding low-quality inputs
+│   │   │   ├── Input A/
+│   │   │   ├── Input B/
+│   │   │   └── ...
+│   ├── test/
+│   ├── data_preparation.py # Data preparation and normalization
+```
+
+Then execute our data processing pipeline. If the path changes, update the configuration information in the file. 
+
+*Note: SAM3 is required to run this pipeline.*
+
+```bash
+cd data
+python data_preparation.py
+```
 
 ## 🚀 Training
 
@@ -86,42 +122,26 @@ Edit hyperparameters in `train.sh` if needed, then run:
 ./train.sh
 ```
 
-*Note: The script is compatible with Weights & Biases (wandb) for logging; make sure the environment is properly configured.*
+*Note: The script is compatible with Weights & Biases (wandb) for logging; make sure the environment is properly configured. Our experiments were conducted in FP32, and the correctness of BF16 and FP16 was not verified.*
 
-<!-- ### 🚂 Train DDL
-**[GPU memory cost: ~11G]**
-```bash
-# Login to wandb
-wandb login
-# or
-# export WANDB_MODE=offline
-sh scripts/train.sh
-```
+## 🎨 Agent Gradio Demo
 
-### 📊 Evaluation
-**[GPU memory cost: ~15G]**
+PerTouch provides a VLM-driven interactive image retouching demo built with Gradio, supporting personalized image retouching through natural language instructions.
 
-**Make sure you have trained DDL or downloaded checkpoints.**
-```bash
-sh scripts/eval.sh
-```
-The results will be saved in ```./results```.
+1. **Ensure dependencies are installed**
+   Complete the [Dependencies and Installation](#-dependencies-and-installation) section first, and download all required models.
 
-### ⚙️ Reproduce Other Methods
-**Make sure you have downloaded all models in `download_model.sh`.**
-```bash
-sh scripts/other_method/eval_${METHOD}.sh
-```
-`METHOD` is the method you want to reproduce.
+2. **Launch the demo**
+   ```bash
+   cd agent
+   python main.py
+   ```
 
-For example, to reproduce Fast-DetectGPT, run:
-```bash
-sh scripts/other_method/eval_fast_det_gpt.sh
-```
-> **Note:** To reproduce DetectGPT and NPR, you should run the following code first:
-```bash
-sh scripts/other_method/generate_perturbs.sh
-``` -->
+3. **Access the interface**
+   The Gradio interface will be available at `http://127.0.0.1:7860`.
+
+
+*Note: Main configuration options are located in `agent/config.py`.*
 
 ---
 
@@ -140,7 +160,7 @@ If you find our work useful, please consider citing:
 
 ## TODO
 
-- [ ] Code of Dataset Preparation and Training Data.
-- [ ] Trained weights of our PerTouch.
-- [ ] VLM-Driven Agent Code and Gradio.
-- [ ] Online Demo.
+- [x] Code of Dataset Preparation.
+- [x] Trained weights of our PerTouch.
+- [x] VLM-Driven Agent Code and Gradio.
+- [x] Online Demo.
